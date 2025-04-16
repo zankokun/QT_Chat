@@ -1,105 +1,188 @@
-#include "server.h"
-#include "clientconnection.h"
+#define WIN32_LEAN_AND_MEAN // макрос для сетевых вещей
 
-Server::Server(QObject *parent) : QTcpServer(parent)
-{
-}
+#include <iostream>
+#include <thread>
+#include <chrono>
 
-Server::~Server()
+#include <vector>
+#include <string>
+#include <windows.h>
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+
+using namespace std;
+
+WSADATA wsaData;
+ADDRINFO hints;
+ADDRINFO *addrResult = NULL;
+SOCKET ClientSocket = INVALID_SOCKET;
+SOCKET ListenSocket = INVALID_SOCKET;
+
+int result;
+int massa[];
+const long MAX = 20000000;
+vector<char> recvBuffer(MAX);
+string sendBuffer = "Hello from SERVER";
+
+vector<bool> clientplace;
+int sizeofclients = 0;
+vector<thread> CLIENT;
+vector<SOCKET> SOCKETS;
+
+int recv_size;
+
+bool receive(SOCKET ClientSocket)
 {
-    for (auto client : clients)
+    int number = 0;
+    DWORD timeout = 1 * 100;
+
+    fill(recvBuffer.begin(), recvBuffer.end(), 0);
+
+    setsockopt(ClientSocket, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+
+    while (1)
     {
-        client->disconnectFromHost();
-    }
-}
-
-void Server::startServer(quint16 port)
-{
-    if (!this->listen(QHostAddress::Any, port))
-    {
-        qDebug() << "Could not start server";
-    }
-    else
-    {
-        qDebug() << "Listening to port" << port << "...";
-    }
-}
-
-void Server::incomingConnection(qintptr socketDescriptor)
-{
-    ClientConnection *client = new ClientConnection(this);
-    client->setSocketDescriptor(socketDescriptor);
-
-    connect(client, &ClientConnection::disconnected, this, [this, client]()
-            { onClientDisconnected(client); });
-
-    clients.append(client);
-    qDebug() << "New client connected:" << client->getName();
-}
-
-void Server::onClientDisconnected(ClientConnection *client)
-{
-    clients.removeAll(client);
-    endVoiceCall(client);
-    client->deleteLater();
-    qDebug() << "Client disconnected:" << client->getName();
-}
-
-void Server::broadcastTextMessage(const QString &message, ClientConnection *sender)
-{
-    for (auto client : clients)
-    {
-        if (client != sender)
+        using namespace chrono;
+        this_thread::sleep_for(250ms);
+        recv_size = recv(ClientSocket, recvBuffer.data(), MAX, 0);
+        if (recv_size == SOCKET_ERROR)
         {
-            client->sendTextMessage(sender->getName(), message);
+            if (WSAGetLastError() != WSAETIMEDOUT)
+            {
+                cout << "Closing the client (Error with setsockopt)" << endl;
+                closesocket(ClientSocket);
+                return 1;
+            }
+        }
+        if (recv_size > 0)
+        {
+            cout << " Size message: " << recv_size - 2 << endl;
+            sendBuffer.assign(recvBuffer.begin(), recvBuffer.begin() + recv_size);
+            number = 0;
+            while (number < sizeofclients)
+            {
+                if (ClientSocket != SOCKETS[number])
+                {
+                    send(SOCKETS[number], sendBuffer.c_str(), (int)(sendBuffer.size()), 0);
+                }
+                number++;
+            }
         }
     }
 }
 
-void Server::broadcastVoiceMessage(const QByteArray &audioData, ClientConnection *sender)
+void work(SOCKET ClientSocket)
 {
-    for (auto client : clients)
+    if (result == SOCKET_ERROR)
     {
-        if (client != sender)
-        {
-            client->sendVoiceMessage(sender->getName(), audioData);
-        }
+        cout << "Error sending data back to the client" << endl;
+        closesocket(ClientSocket);
+        freeaddrinfo(addrResult);
+        WSACleanup();
+        return;
+    }
+
+    receive(ClientSocket);
+}
+
+bool listening(SOCKET ClientSocket)
+{
+    result = WSAStartup(MAKEWORD(2, 2), &wsaData);
+
+    if (result != 0)
+    {
+        cout << "Error with WSAStartup" << endl;
+        return 1;
+    }
+
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
+
+    result = getaddrinfo(NULL, "2626", &hints, &addrResult);
+
+    if (result != 0)
+    {
+        cout << "Error with getaddrinfo" << endl;
+        WSACleanup();
+        return 1;
+    }
+
+    ListenSocket = socket(addrResult->ai_family, addrResult->ai_socktype, addrResult->ai_protocol);
+    if (ListenSocket == INVALID_SOCKET)
+    {
+        cout << "Error with socket creating" << endl;
+        freeaddrinfo(addrResult);
+        WSACleanup();
+        return 1;
+    }
+
+    result = bind(ListenSocket, addrResult->ai_addr, (int)addrResult->ai_addrlen);
+
+    if (result == SOCKET_ERROR)
+    {
+        cout << "Error with socket binding" << endl;
+        closesocket(ListenSocket);
+        ListenSocket = INVALID_SOCKET;
+        freeaddrinfo(addrResult);
+        WSACleanup();
+        return 1;
+    }
+
+    result = listen(ListenSocket, SOMAXCONN);
+
+    if (result == SOCKET_ERROR)
+    {
+        cout << "Error with listening the socket" << endl;
+        closesocket(ListenSocket);
+        freeaddrinfo(addrResult);
+        WSACleanup();
+        return 1;
+    }
+
+    while (1)
+    {
+        ClientSocket = accept(ListenSocket, NULL, NULL);
+        thread T(work, ClientSocket);
+        CLIENT.push_back(std::move(T));
+        SOCKETS.push_back(ClientSocket);
+        clientplace.push_back(true);
+        sizeofclients++;
     }
 }
 
-void Server::startVoiceCall(ClientConnection *caller, const QString &calleeName)
+int main()
 {
-    for (auto client : clients)
-    {
-        if (client->getName() == calleeName)
-        {
-            activeCalls.insert(caller->getName(), caller);
-            activeCalls.insert(calleeName, client);
+    setlocale(LC_ALL, "Russian");
 
-            client->sendCallRequest(caller->getName());
-            caller->sendCallResponse(true, calleeName);
-            return;
-        }
+    listening(ClientSocket);
+
+    if (ClientSocket == INVALID_SOCKET)
+    {
+        cout << "Error accepting the socket" << endl;
+        closesocket(ListenSocket);
+        freeaddrinfo(addrResult);
+        WSACleanup();
+        return 1;
     }
 
-    caller->sendCallResponse(false, calleeName);
-}
+    closesocket(ListenSocket);
 
-void Server::endVoiceCall(ClientConnection *caller)
-{
-    if (activeCalls.contains(caller->getName()))
+    result = shutdown(ClientSocket, SD_SEND); // закрываем клиент-сокет
+
+    if (result == SOCKET_ERROR)
     {
-        ClientConnection *callee = activeCalls.value(caller->getName());
-        if (callee)
-        {
-            callee->sendCallEnded(caller->getName());
-        }
-
-        activeCalls.remove(caller->getName());
-        if (callee)
-        {
-            activeCalls.remove(callee->getName());
-            caller->sendCallEnded(callee->getName());
-        }
+        cout << "Error with client socket shutdown" << endl;
+        closesocket(ClientSocket);
+        freeaddrinfo(addrResult);
+        WSACleanup();
+        return 1;
     }
+
+    closesocket(ClientSocket);
+    freeaddrinfo(addrResult);
+    WSACleanup();
+    return 0;
 }
